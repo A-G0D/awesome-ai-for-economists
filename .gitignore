@@ -6,3 +6,4 @@
 .tmp_*
 .scout_*
 _scout_*
+section_dump*.txt
