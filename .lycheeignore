@@ -1,0 +1,13 @@
+# URLs that the weekly link check skips (regular expressions, one per line).
+
+# Star badges return 200 even for deleted repositories. The workflow checks
+# those repositories through the GitHub API instead.
+^https://img\.shields\.io/
+
+# Hosts that reset the connection, fail over HTTP/2, loop through login
+# redirects, or return status 999 to automated clients. Check these by hand.
+^https://fred\.stlouisfed\.org/
+^https://gemini\.google\.com/
+^https://www\.sciencedirect\.com/
+^https://([a-z0-9-]+\.)?linkedin\.com/
+^https://(www\.)?(twitter|x)\.com/

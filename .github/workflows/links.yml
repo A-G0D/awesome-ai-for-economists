@@ -1,0 +1,103 @@
+name: Link check
+
+# Weekly and on demand only, never on pull requests: some publishers block
+# automated clients, so a failure here is a to-do item, not a merge blocker.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays at 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 403 and 429 count as working: OUP, Wiley, SSRN, openai.com, and similar
+      # sites send them to bots even when the page exists. Hosts that reset the
+      # connection or return other codes to bots are listed in .lycheeignore.
+      - name: Check links
+        id: lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --max-concurrency 16
+            --max-retries 3
+            --retry-wait-time 10
+            --timeout 30
+            --accept 200..=299,403,429
+            --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+            README.md CONTRIBUTING.md
+          output: lychee/report.md
+          fail: false
+
+      - name: Check listed GitHub repositories
+        id: repos
+        run: |
+          : > repo-report.md
+          grep -oE 'img\.shields\.io/github/stars/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' README.md \
+            | cut -d/ -f4,5 | sort -u > repos.txt
+          while read -r repo; do
+            if ! info=$(gh api "repos/$repo" --jq '[.full_name, .archived] | @tsv' 2>/dev/null); then
+              echo "- [ ] \`$repo\`: not found (deleted, private, or misspelled)" >> repo-report.md
+              continue
+            fi
+            IFS=$'\t' read -r full archived <<< "$info"
+            if [ "$archived" = "true" ]; then
+              echo "- [ ] \`$repo\`: archived (remove the entry)" >> repo-report.md
+            fi
+            if [ "$full" != "$repo" ]; then
+              echo "- [ ] \`$repo\`: now \`$full\` (update the link and badge)" >> repo-report.md
+            fi
+          done < repos.txt
+          echo "Checked $(wc -l < repos.txt) repositories."
+          if [ -s repo-report.md ]; then
+            echo "problems=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open, update, or close the link-check issue
+        env:
+          LINKS_FAILED: ${{ steps.lychee.outputs.exit_code != '0' }}
+          REPOS_FAILED: ${{ steps.repos.outputs.problems == 'true' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          label=link-check
+          gh label create "$label" --color FBCA04 --description "Problems found by the weekly link check" --force
+          number=$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')
+          if [ "$LINKS_FAILED" != "true" ] && [ "$REPOS_FAILED" != "true" ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "All links and repositories passed in $RUN_URL."
+            fi
+            exit 0
+          fi
+          {
+            echo "The weekly link check found the problems below ([workflow run]($RUN_URL))."
+            echo "If a flagged link works in a browser, its host is probably blocking bots: add it to \`.lycheeignore\`."
+            echo
+            if [ "$REPOS_FAILED" = "true" ]; then
+              echo "## Archived, moved, or missing repositories"
+              echo
+              cat repo-report.md
+              echo
+            fi
+            if [ "$LINKS_FAILED" = "true" ]; then
+              echo "## Broken links"
+              echo
+              cat lychee/report.md
+            fi
+          } > issue.md
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file issue.md
+          else
+            gh issue create --title "Link check found problems" --label "$label" --body-file issue.md
+          fi
